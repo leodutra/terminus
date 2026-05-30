@@ -24,6 +24,7 @@ Validation:
 
 - [ ] Implement `model.rs` with `Package`, `PackageSource`, `FileNode`, `ConfigMapping`, `Dependency`, `ScanMetadata`, and related enums.
 - [ ] Implement `platform.rs` with `ScanProgress`, `ScanResult`, `ConfigSearchSpec`, and `PlatformAdapter`.
+- [ ] Add test-only fake or mock `PlatformAdapter` implementations so core and launcher behavior can be tested without real package managers.
 - [ ] Implement `system_model.rs` with indexes and query helpers.
 - [ ] Define `PackageDetails` and `SearchResults` return types used by the query API.
 
