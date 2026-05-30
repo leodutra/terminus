@@ -24,6 +24,7 @@ Validation:
 
 - [ ] Implement `model.rs` with `Package`, `PackageSource`, `FileNode`, `ConfigMapping`, `Dependency`, `ScanMetadata`, and related enums.
 - [ ] Implement `platform.rs` with `ScanProgress`, `ScanResult`, `ConfigSearchSpec`, and `PlatformAdapter`.
+- [ ] Add a small `ProgressReporter` helper around `Sender<ScanProgress>` so scanner code can emit observer-style progress without repeated channel boilerplate.
 - [ ] Add test-only fake or mock `PlatformAdapter` implementations so core and launcher behavior can be tested without real package managers.
 - [ ] Implement `system_model.rs` with indexes and query helpers.
 - [ ] Define `PackageDetails` and `SearchResults` return types used by the query API.
@@ -92,6 +93,7 @@ Validation:
 ## Phase 4: Launcher, Scan Orchestration, and Caching
 
 - [ ] Implement launcher-side platform selection.
+- [ ] Implement a launcher-owned `ScanCoordinator` that runs synchronous scans on a worker thread and owns progress/result channels.
 - [ ] Load cached state on startup before refreshing in the background.
 - [ ] Run scans on a background thread.
 - [ ] Wire `ScanProgress` delivery from the scanner thread into launcher and loading-state updates.
