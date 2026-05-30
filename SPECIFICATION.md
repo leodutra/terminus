@@ -27,7 +27,7 @@ This is a permanent design constraint, not a temporary MVP limitation. Package m
 
 Linux has excellent tools for doing things: `pacman`, `apt`, `systemctl`, `rm`.
 
-Linux has no tool for *seeing* things — not as isolated facts (`pacman -Qi neovim`), but as a connected whole:
+Linux has no tool for *seeing* things — not as isolated facts (`pacman -Qi git`), but as a connected whole:
 
 - This binary belongs to this package
 - This package owns these configs in three different locations
