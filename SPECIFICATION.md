@@ -66,7 +66,7 @@ Hard separation between what you see and where the data comes from.
 └──────────────┴──────────────┴────────────────────────┘
 ```
 
-The GUI never imports a platform crate. The core never shells out to a command. Adding a new platform means adding one crate — zero changes to GUI or core.
+The GUI crate never imports a platform crate. The core never shells out to a command. The launcher binary owns platform detection and wires a chosen adapter into the UI. Adding a new platform means adding one adapter crate and one launcher registration — zero changes to `terminus-gui` or `terminus-core`.
 
 Two adapters ship on day one. This forces the abstraction to be real, not theoretical.
 
@@ -92,7 +92,7 @@ pub struct Package {
 
 pub enum PackageSource {
     Pacman,
-    PacmanAUR,
+    PacmanForeign,
     Apt,
 }
 
@@ -141,7 +141,8 @@ pub struct OrphanedConfig {
 
 pub struct Dependency {
     pub from_package_id: i64,
-    pub to_package_name: String,
+    pub raw_clause: String,
+    pub resolved_package_id: Option<i64>,
 }
 
 pub struct ScanMetadata {
@@ -163,7 +164,7 @@ pub struct ScanMetadata {
 
 pub struct SystemModel {
     pub packages: Vec<Package>,
-    pub packages_by_name: HashMap<String, usize>,
+    pub packages_by_name: HashMap<String, Vec<usize>>,
     pub packages_by_id: HashMap<i64, usize>,
 
     pub files_by_package: HashMap<i64, Vec<FileNode>>,
@@ -173,8 +174,8 @@ pub struct SystemModel {
     pub configs_by_package: HashMap<i64, Vec<ConfigMapping>>,
     pub orphaned_configs: Vec<OrphanedConfig>,
 
-    pub dependencies: HashMap<i64, Vec<String>>,
-    pub reverse_deps: HashMap<String, Vec<i64>>,
+    pub dependencies: HashMap<i64, Vec<Dependency>>,
+    pub reverse_deps: HashMap<i64, Vec<i64>>,
 
     pub meta: ScanMetadata,
 }
@@ -190,6 +191,8 @@ impl SystemModel {
 ```
 
 The GUI only talks to SystemModel. Never to SQLite. Never to the filesystem. Never to a package manager.
+
+Package identity inside core is always `id`. Names are for display and search, not relationship keys. Dependency edges store the raw package-manager clause plus an optional resolved package id when the clause maps to an installed package.
 
 ### 4.3 SQLite Schema
 
@@ -214,9 +217,10 @@ CREATE TABLE files (
 );
 
 CREATE TABLE dependencies (
-    from_pkg_id INTEGER NOT NULL REFERENCES packages(id),
-    to_pkg_name TEXT NOT NULL,
-    PRIMARY KEY (from_pkg_id, to_pkg_name)
+    from_pkg_id      INTEGER NOT NULL REFERENCES packages(id),
+    raw_clause       TEXT NOT NULL,
+    resolved_pkg_id  INTEGER REFERENCES packages(id),
+    PRIMARY KEY (from_pkg_id, raw_clause)
 );
 
 CREATE TABLE config_mappings (
@@ -251,6 +255,7 @@ CREATE INDEX idx_files_package ON files(package_id);
 CREATE INDEX idx_files_path ON files(path);
 CREATE INDEX idx_config_package ON config_mappings(package_id);
 CREATE INDEX idx_deps_from ON dependencies(from_pkg_id);
+CREATE INDEX idx_deps_resolved ON dependencies(resolved_pkg_id);
 CREATE INDEX idx_packages_source ON packages(source);
 ```
 
@@ -311,7 +316,8 @@ fn detect() -> bool {
 |------------------|-----------------|---------------------------------  |
 | All packages     | `pacman -Qi`    | Single call, key-value parser     |
 | File ownership   | `pacman -Ql`    | Single call, line splitting       |
-| Native vs AUR    | `pacman -Qm`    | Foreign package list              |
+| Dependencies     | `pacman -Qi`    | Parse `Depends On`, resolve to installed packages when possible |
+| Native vs foreign | `pacman -Qm`   | Foreign package list              |
 | Staleness        | `/var/log/pacman.log` | Compare last entry timestamp |
 
 ### Config Search Paths
@@ -338,6 +344,7 @@ fn detect() -> bool {
 |------------------|------------------------------------------|---------------------------------|
 | All packages     | `dpkg-query -W -f='...'`                | Custom format string            |
 | File ownership   | `/var/lib/dpkg/info/*.list`              | Read files directly, not per-pkg |
+| Dependencies     | `dpkg-query -W -f='...'`                | Parse `Depends` / `Pre-Depends`, resolve to installed packages when possible |
 | Install dates    | `.list` file mtimes                      | Approximate                     |
 | Install reason   | `apt-mark showmanual`                    | Explicit vs dependency          |
 | Staleness        | `/var/log/dpkg.log`                      | Last entry timestamp            |
@@ -427,7 +434,9 @@ Home directory configs (`~/.config/`, `~/.*`) classified at runtime after path e
 
 ```
 terminus/
-├── Cargo.toml                          (workspace)
+├── Cargo.toml                          (workspace + launcher binary)
+├── src/
+│   └── main.rs                        # Launcher: platform detection, cache load, eframe start
 ├── crates/
 │   ├── terminus-core/
 │   │   ├── src/
@@ -457,7 +466,7 @@ terminus/
 │   │
 │   └── terminus-gui/
 │       ├── src/
-│       │   ├── main.rs                # Platform detection, eframe launch
+│       │   ├── lib.rs                 # Render-only app shell
 │       │   ├── app.rs                 # App state, tab routing
 │       │   ├── views/
 │       │   │   ├── mod.rs
@@ -483,27 +492,34 @@ terminus/
 ### Dependency Enforcement
 
 ```toml
-# terminus-gui/Cargo.toml
+# Cargo.toml (workspace root / launcher binary)
 [features]
 default = ["arch", "ubuntu"]
 arch = ["dep:terminus-platform-arch"]
 ubuntu = ["dep:terminus-platform-ubuntu"]
 
 [dependencies]
+terminus-core = { path = "crates/terminus-core" }
+terminus-gui = { path = "crates/terminus-gui" }
+terminus-platform-arch = { path = "crates/terminus-platform-arch", optional = true }
+terminus-platform-ubuntu = { path = "crates/terminus-platform-ubuntu", optional = true }
+```
+
+```toml
+# crates/terminus-gui/Cargo.toml
+[dependencies]
 terminus-core = { path = "../terminus-core" }
-terminus-platform-arch = { path = "../terminus-platform-arch", optional = true }
-terminus-platform-ubuntu = { path = "../terminus-platform-ubuntu", optional = true }
 eframe = "0.29"
 egui = "0.29"
 egui_extras = "0.29"
 ```
 
-Platform crates are linked at the binary level. The GUI module never imports them.
+Platform crates are linked only by the launcher binary. The GUI crate remains render-only and depends only on `terminus-core`.
 
 ### Runtime Detection
 
 ```rust
-// ── terminus-gui/src/main.rs ──
+// ── terminus/src/main.rs ──
 
 fn detect_platform() -> Box<dyn PlatformAdapter> {
     #[cfg(feature = "arch")]
@@ -519,6 +535,8 @@ fn detect_platform() -> Box<dyn PlatformAdapter> {
     panic!("No supported platform detected");
 }
 ```
+
+The launcher detects the platform, loads or refreshes the `SystemModel`, and then starts the GUI. `terminus-gui` receives model data and user events only.
 
 ---
 
@@ -601,6 +619,8 @@ neovim-qt · python-pynvim
 ── Files (127) ─────────────────
 [collapsible tree]
 ```
+
+Dependencies display the resolved installed package name when available; otherwise they fall back to the raw package-manager clause.
 
 ### 12.3 Configs View
 
@@ -798,5 +818,5 @@ Every version is readonly. Terminus observes. It never acts.
 2. **terminus-core never shells out to any command.**
 3. **The GUI reads only from SystemModel. Never SQLite. Never the filesystem.**
 4. **Platform detection is automatic. The user never configures their distro.**
-5. **Adding a platform means adding one crate. Zero changes to existing code.**
+5. **Adding a platform means adding one adapter crate and wiring it into the launcher. Zero changes to terminus-gui or terminus-core.**
 6. **Terminus never writes to the filesystem beyond its own database.**
