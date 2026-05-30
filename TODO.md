@@ -59,6 +59,7 @@ Validation:
 - [ ] Parse dependency clauses from pacman metadata and resolve installed package ids when possible.
 - [ ] Use `pacman -Qm` to tag foreign packages via `source.channel`.
 - [ ] Provide the default Linux `ConfigSearchSpec`.
+- [ ] Emit `PackagesFound`, `FilesIndexed`, and `ConfigsMatched` progress updates during the scan.
 - [ ] Implement package freshness with `/var/log/pacman.log`.
 - [ ] Return a complete `ScanResult` or a hard failure without partial state replacement.
 
@@ -77,6 +78,7 @@ Validation:
 - [ ] Parse dependency clauses from dpkg metadata and resolve installed package ids when possible.
 - [ ] Approximate install dates from `.list` file mtimes.
 - [ ] Provide the default Linux `ConfigSearchSpec`.
+- [ ] Emit `PackagesFound`, `FilesIndexed`, and `ConfigsMatched` progress updates during the scan.
 - [ ] Implement package freshness with `/var/log/dpkg.log`.
 - [ ] Continue scanning when individual `.list` files are unreadable.
 
@@ -150,7 +152,9 @@ Validation:
 ## Phase 8: Disk View, Global Search, and Polish
 
 - [ ] Implement the treemap, or fall back to a horizontal bar chart if treemap complexity is not paying off.
+- [ ] Add disk-view hover details, click-to-inspect behavior, and the summary bar totals.
 - [ ] Add the explicit-only vs all-packages toggle.
+- [ ] Bind global search to `Ctrl+K` and `/`.
 - [ ] Implement case-insensitive substring global search across package names, descriptions, file paths, and config paths.
 - [ ] Group global search results by type and make result selection navigate to the correct view and open the relevant detail panel.
 - [ ] Add keyboard navigation and confidence tooltips.
@@ -167,6 +171,8 @@ Validation:
 - [ ] Add `assets/terminus.svg`.
 - [ ] Update `README.md` with build, run, platform support, and screenshots.
 - [ ] Document refresh behavior and readonly guarantees.
+- [ ] Produce an Arch AUR package definition.
+- [ ] Produce an Ubuntu distribution artifact via `cargo-deb` or AppImage.
 - [ ] Verify release build output.
 
 Validation:
