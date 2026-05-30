@@ -312,13 +312,13 @@ fn detect() -> bool {
 
 ### Data Sources
 
-| Data             | Command         | Notes                             |
-|------------------|-----------------|---------------------------------  |
-| All packages     | `pacman -Qi`    | Single call, key-value parser     |
-| File ownership   | `pacman -Ql`    | Single call, line splitting       |
-| Dependencies     | `pacman -Qi`    | Parse `Depends On`, resolve to installed packages when possible |
-| Native vs foreign | `pacman -Qm`   | Foreign package list              |
-| Staleness        | `/var/log/pacman.log` | Compare last entry timestamp |
+| Data             | Command               | Notes                                                           |
+|------------------|-----------------------|-----------------------------------------------------------------|
+| All packages     | `pacman -Qi`          | Single call, key-value parser                                   |
+| File ownership   | `pacman -Ql`          | Single call, line splitting                                     |
+| Dependencies     | `pacman -Qi`          | Parse `Depends On`, resolve to installed packages when possible |
+| Native vs foreign | `pacman -Qm`         | Foreign package list                                            |
+| Staleness        | `/var/log/pacman.log` | Compare last entry timestamp                                    |
 
 ### Config Search Paths
 
@@ -340,14 +340,14 @@ fn detect() -> bool {
 
 ### Data Sources
 
-| Data             | Source                                   | Notes                           |
-|------------------|------------------------------------------|---------------------------------|
-| All packages     | `dpkg-query -W -f='...'`                | Custom format string            |
-| File ownership   | `/var/lib/dpkg/info/*.list`              | Read files directly, not per-pkg |
-| Dependencies     | `dpkg-query -W -f='...'`                | Parse `Depends` / `Pre-Depends`, resolve to installed packages when possible |
-| Install dates    | `.list` file mtimes                      | Approximate                     |
-| Install reason   | `apt-mark showmanual`                    | Explicit vs dependency          |
-| Staleness        | `/var/log/dpkg.log`                      | Last entry timestamp            |
+| Data             | Source                                   | Notes                                                                        |
+|------------------|------------------------------------------|------------------------------------------------------------------------------|
+| All packages     | `dpkg-query -W -f='...'`                 | Custom format string                                                         |
+| File ownership   | `/var/lib/dpkg/info/*.list`              | Read files directly, not per-pkg                                             |
+| Dependencies     | `dpkg-query -W -f='...'`                 | Parse `Depends` / `Pre-Depends`, resolve to installed packages when possible |
+| Install dates    | `.list` file mtimes                      | Approximate                                                                  |
+| Install reason   | `apt-mark showmanual`                    | Explicit vs dependency                                                       |
+| Staleness        | `/var/log/dpkg.log`                      | Last entry timestamp                                                         |
 
 ### Config Search Paths
 
