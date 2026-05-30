@@ -197,6 +197,8 @@ Package identity inside core is always `id`. Names are for display and search, n
 
 Config ownership is intentionally one-to-many. `ConfigMapping` stores every candidate above the orphan threshold. `is_primary` marks the current best owner set. If more than one mapping for a path is primary, the path is shared or ambiguous and the UI should surface that explicitly rather than collapsing it to one silent winner.
 
+Configs are collected and de-duplicated canonically by path. App-level groupings in the UI are derived from those path-keyed mappings, not stored as a separate source of truth.
+
 ### 4.3 SQLite Schema
 
 ```sql
@@ -673,7 +675,9 @@ Dependencies display the resolved installed package name when available; otherwi
 
 ### 12.3 Configs View
 
-Grouped by app. Orphans prominent at the bottom.
+Collected by path, presented grouped under the related app. Orphans remain prominent at the bottom.
+
+Single-owner paths appear under their primary app section. Shared or ambiguous paths stay path-keyed internally, but are surfaced in a dedicated Shared / Ambiguous section so the same config path is not duplicated under multiple apps.
 
 ```
 ── neovim ──────────────────────────────────
