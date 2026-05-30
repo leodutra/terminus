@@ -565,7 +565,7 @@ egui_extras = "0.29"
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  Terminus                                [search] [⟳] [⚙]      │
+│  Terminus                                [search] [⟳] [⚙]       │
 ├────────────┬─────────────────────────────────────────────────────┤
 │            │                                                     │
 │ ◉ Packages │  [Main content area]                                │
@@ -575,10 +575,10 @@ egui_extras = "0.29"
 │ ○ Disk     │                                                     │
 │            │                                                     │
 │            ├─────────────────────────────────────────────────────┤
-│            │  [Detail panel — contextual, collapsible]            │
+│            │  [Detail panel — contextual, collapsible]           │
 │            │                                                     │
 ├────────────┴─────────────────────────────────────────────────────┤
-│  Arch Linux · 1,847 packages · 12.4 GB · Scanned 2 hours ago    │
+│  Arch Linux · 1,847 packages · 12.4 GB · Scanned 2 hours ago     │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
