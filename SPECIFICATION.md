@@ -43,20 +43,20 @@ Terminus builds that connected picture and shows it to you. What you do with tha
 Hard separation between what you see and where the data comes from.
 
 ```
-┌─────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────┐
 │                    terminus-gui                      │
 │            UI rendering, interaction                 │
 │         Knows nothing about pacman, apt,             │
 │         or any specific data source                  │
 │                                                      │
-│         Depends only on: terminus-core                │
-├─────────────────────────────────────────────────────┤
+│         Depends only on: terminus-core               │
+├──────────────────────────────────────────────────────┤
 │                   terminus-core                      │
 │          Platform-agnostic data model                │
 │      SystemModel, Package, FileNode, Config          │
 │      Query operations, storage, traits               │
 │                                                      │
-│         Depends on: nothing platform-specific         │
+│         Depends on: nothing platform-specific        │
 ├──────────────┬──────────────┬────────────────────────┤
 │ terminus-    │ terminus-    │ (future adapters)      │
 │ platform-    │ platform-    │                        │
