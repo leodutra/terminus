@@ -90,10 +90,9 @@ pub struct Package {
     pub description: Option<String>,
 }
 
-pub enum PackageSource {
-    Pacman,
-    PacmanForeign,
-    Apt,
+pub struct PackageSource {
+    pub manager_id: String,      // pacman, apt, dnf, flatpak, winget, ...
+    pub channel: Option<String>, // official, foreign, aur, ppa, store, ...
 }
 
 pub enum InstallReason {
@@ -124,6 +123,7 @@ pub struct ConfigMapping {
     pub package_id: i64,
     pub confidence: f64,
     pub method: MatchMethod,
+    pub is_primary: bool,
 }
 
 pub enum MatchMethod {
@@ -171,6 +171,7 @@ pub struct SystemModel {
     pub package_by_file: HashMap<String, i64>,
 
     pub configs: Vec<ConfigMapping>,
+    pub configs_by_path: HashMap<String, Vec<ConfigMapping>>,
     pub configs_by_package: HashMap<i64, Vec<ConfigMapping>>,
     pub orphaned_configs: Vec<OrphanedConfig>,
 
@@ -192,7 +193,9 @@ impl SystemModel {
 
 The GUI only talks to SystemModel. Never to SQLite. Never to the filesystem. Never to a package manager.
 
-Package identity inside core is always `id`. Names are for display and search, not relationship keys. Dependency edges store the raw package-manager clause plus an optional resolved package id when the clause maps to an installed package.
+Package identity inside core is always `id`. Names are for display and search, not relationship keys. Package source is descriptive adapter metadata, not a core enum that must grow for every new platform. Dependency edges store the raw package-manager clause plus an optional resolved package id when the clause maps to an installed package.
+
+Config ownership is intentionally one-to-many. `ConfigMapping` stores every candidate above the orphan threshold. `is_primary` marks the current best owner set. If more than one mapping for a path is primary, the path is shared or ambiguous and the UI should surface that explicitly rather than collapsing it to one silent winner.
 
 ### 4.3 SQLite Schema
 
@@ -201,12 +204,13 @@ CREATE TABLE packages (
     id              INTEGER PRIMARY KEY,
     name            TEXT NOT NULL,
     version         TEXT NOT NULL,
-    source          TEXT NOT NULL,
+    manager_id      TEXT NOT NULL,
+    source_channel  TEXT NOT NULL DEFAULT '',
     size_bytes      INTEGER,
     install_date    TEXT,
     install_reason  TEXT,
     description     TEXT,
-    UNIQUE(name, source)
+    UNIQUE(name, manager_id, source_channel)
 );
 
 CREATE TABLE files (
@@ -229,6 +233,7 @@ CREATE TABLE config_mappings (
     package_id  INTEGER NOT NULL REFERENCES packages(id),
     confidence  REAL NOT NULL,
     method      TEXT NOT NULL,
+    is_primary  INTEGER NOT NULL DEFAULT 0,
     UNIQUE(config_path, package_id)
 );
 
@@ -253,10 +258,11 @@ CREATE TABLE scan_metadata (
 
 CREATE INDEX idx_files_package ON files(package_id);
 CREATE INDEX idx_files_path ON files(path);
+CREATE INDEX idx_config_path ON config_mappings(config_path);
 CREATE INDEX idx_config_package ON config_mappings(package_id);
 CREATE INDEX idx_deps_from ON dependencies(from_pkg_id);
 CREATE INDEX idx_deps_resolved ON dependencies(resolved_pkg_id);
-CREATE INDEX idx_packages_source ON packages(source);
+CREATE INDEX idx_packages_manager ON packages(manager_id);
 ```
 
 MVP persistence rule: only a completed scan replaces the previous saved state. If the database is unreadable or corrupt, rebuild it from a fresh scan instead of trying to use partial data.
@@ -286,17 +292,47 @@ pub struct ScanResult {
     pub meta: ScanMetadata,
 }
 
+pub struct ConfigSearchSpec {
+    pub directories: Vec<String>,
+    pub known_directories: Vec<String>,
+    pub known_files: Vec<String>,
+}
+
 pub trait PlatformAdapter: Send + Sync {
     fn platform_name(&self) -> &str;
     fn platform_id(&self) -> &str;
     fn scan(&self, progress: Sender<ScanProgress>) -> Result<ScanResult>;
     fn detect() -> bool where Self: Sized;
-    fn config_search_paths(&self) -> Vec<String>;
-    fn has_changes_since(&self, scan_date: &str) -> Result<bool>;
+    fn config_search_spec(&self) -> ConfigSearchSpec;
+    fn has_package_state_changes_since(&self, scan_date: &str) -> Result<bool>;
 }
 ```
 
-Implementation note: `scan()` returns a complete result or an error. It should not partially overwrite the last good scan. `has_changes_since()` is based on package-manager state, not a simple time-to-live.
+Implementation note: `scan()` returns a complete result or an error. It should not partially overwrite the last good scan. Package freshness and config freshness are separate concerns. `has_package_state_changes_since()` is based on package-manager state only. Config freshness is checked outside adapters because config scanning lives in `terminus-core` and the launcher.
+
+### Shared Linux Config Search Spec
+
+For MVP, the Linux adapters start from the same default config search scope:
+
+```rust
+fn default_linux_config_search_spec() -> ConfigSearchSpec {
+    ConfigSearchSpec {
+        directories: vec!["/etc", "/etc/xdg", "~/.config"],
+        known_directories: vec!["~/.ssh", "~/.gnupg", "~/.vim", "~/.emacs.d"],
+        known_files: vec![
+            "~/.gitconfig",
+            "~/.zshrc",
+            "~/.bashrc",
+            "~/.profile",
+            "~/.bash_profile",
+            "~/.vimrc",
+            "~/.tmux.conf",
+        ],
+    }
+}
+```
+
+Adapters may extend this later when a platform needs additional known config roots.
 
 ---
 
@@ -317,14 +353,12 @@ fn detect() -> bool {
 | All packages     | `pacman -Qi`          | Single call, key-value parser                                   |
 | File ownership   | `pacman -Ql`          | Single call, line splitting                                     |
 | Dependencies     | `pacman -Qi`          | Parse `Depends On`, resolve to installed packages when possible |
-| Native vs foreign | `pacman -Qm`         | Foreign package list                                            |
+| Source detail    | `pacman -Qm`          | Marks channel `foreign`; future enrichers may tag `aur` when detectable |
 | Staleness        | `/var/log/pacman.log` | Compare last entry timestamp                                    |
 
-### Config Search Paths
+### Config Search Spec
 
-```rust
-vec!["/etc", "~/.config", "~/.local/share", "~/.*"]
-```
+Uses `default_linux_config_search_spec()`.
 
 ---
 
@@ -349,11 +383,9 @@ fn detect() -> bool {
 | Install reason   | `apt-mark showmanual`                    | Explicit vs dependency                                                       |
 | Staleness        | `/var/log/dpkg.log`                      | Last entry timestamp                                                         |
 
-### Config Search Paths
+### Config Search Spec
 
-```rust
-vec!["/etc", "~/.config", "~/.local/share", "~/.*"]
-```
+Uses `default_linux_config_search_spec()`.
 
 ### Key Difference
 
@@ -365,7 +397,7 @@ If a `.list` file is unreadable, keep scanning and treat the affected package da
 
 ## 8. Config Matching Engine
 
-Lives in `terminus-core`. Platform-agnostic. Takes package names, file lists, and config search paths as input.
+Lives in `terminus-core`. Platform-agnostic. Takes package names, file lists, and config search spec as input.
 
 ### Method 1: package-files (confidence 0.80–0.95)
 
@@ -397,9 +429,19 @@ pub static ALIASES: &[(&str, &str)] = &[
 
 Starts hardcoded. Migrates to a config file post-MVP.
 
+MVP scope rule: the search spec is a conservative allowlist, not a recursive `~/.*` sweep. Avoid `~/.local/share` and arbitrary home dot-directories by default; they contain too much state and cache noise to present as trustworthy config ownership.
+
 ### Orphan Rule
 
-If no candidate for a config path reaches 0.45 confidence, treat it as orphaned. If multiple packages tie, prefer the higher-confidence method first (`package-files` over `known-alias` over `name-match`), then package name for stable ordering.
+If no candidate for a config path reaches 0.45 confidence, treat it as orphaned.
+
+Persist every candidate at or above 0.45 confidence.
+
+If one candidate clearly wins, mark it primary.
+
+If multiple candidates tie for the top score, or land within a narrow confidence window of the best score, keep the multiplicity and mark all of those candidates primary. Prefer the higher-confidence method first (`package-files` over `known-alias` over `name-match`), then package name for stable ordering, but do not discard effectively-equal owners just to force a single result.
+
+The UI should highlight shared or ambiguous ownership with an explicit warning marker, not hide it behind a single package label.
 
 ---
 
@@ -407,26 +449,33 @@ If no candidate for a config path reaches 0.45 confidence, treat it as orphaned.
 
 ```rust
 pub struct PathClassifier {
-    rules: Vec<(String, FileType)>,
+    prefix_rules: Vec<(String, FileType)>,
 }
 
 impl PathClassifier {
     pub fn linux() -> Self {
-        Self { rules: vec![
-            ("/usr/bin/",    FileType::Binary),
-            ("/usr/sbin/",   FileType::Binary),
-            ("/bin/",        FileType::Binary),
-            ("/sbin/",       FileType::Binary),
-            ("/etc/",        FileType::Config),
-            ("/usr/lib/",    FileType::Library),
-            ("/usr/share/",  FileType::Data),
-            ("/var/cache/",  FileType::Cache),
+        Self { prefix_rules: vec![
+            ("/usr/bin/",      FileType::Binary),
+            ("/usr/sbin/",     FileType::Binary),
+            ("/bin/",          FileType::Binary),
+            ("/sbin/",         FileType::Binary),
+            ("/usr/libexec/",  FileType::Binary),
+            ("/etc/",          FileType::Config),
+            ("/etc/xdg/",      FileType::Config),
+            ("/usr/lib/",      FileType::Library),
+            ("/usr/lib64/",    FileType::Library),
+            ("/lib/",          FileType::Library),
+            ("/lib64/",        FileType::Library),
+            ("/usr/share/",    FileType::Data),
+            ("/var/lib/",      FileType::Data),
+            ("/opt/",          FileType::Data),
+            ("/var/cache/",    FileType::Cache),
         ]}
     }
 }
 ```
 
-Home directory configs (`~/.config/`, `~/.*`) classified at runtime after path expansion. If a path matches no rule, classify it as `Other`.
+Classification rule: use the longest matching prefix first. Home config paths from `ConfigSearchSpec` always classify as `Config`. Add small runtime heuristics for `/opt/*/bin/`, `/opt/*/lib/`, and `.so` / `.so.*` shared objects before falling back to `Other`. Favor predictable broad categories over speculative fine-grained guesses.
 
 ---
 
@@ -634,13 +683,18 @@ Grouped by app. Orphans prominent at the bottom.
 ── git ─────────────────────────────────────
    ~/.gitconfig                      ●●●●●
 
+── Shared / Ambiguous ─────────────────────
+    ~/.config/foo/                    !  foo-cli · foo-gui
+
 ── Unmatched ───────────────────────────────
    ~/.config/polybar/                  ?
    ~/.config/rofi/                     ?
    ~/.config/dunst/                    ?
 ```
 
-Filters: All / Matched / Orphaned
+Filters: All / Matched / Shared / Orphaned
+
+If a config path has multiple primary owners, show a warning badge and surface all primary candidates in the row details or tooltip.
 
 ### 12.4 Disk View
 
@@ -676,7 +730,9 @@ For MVP, substring search is enough. It should be case-insensitive.
 Arch Linux · 1,847 packages · 12.4 GB · Scanned 2 hours ago
 ```
 
-If system state has changed since last scan: "System has changed. Refresh?"
+If package state has changed since last scan: "System packages changed. Refresh?"
+
+If config files may have changed since last scan: "Config files may have changed. Refresh?"
 
 ---
 
@@ -718,11 +774,19 @@ Only a completed scan swaps into `SystemModel` and replaces the saved database.
 
 1. Open Terminus
 2. Check for `~/.local/share/terminus/state.db`
-3. If exists and fresh → load SystemModel, show main UI immediately
-4. If exists but stale → load cached data, show "outdated" hint in status bar
-5. If not exists → show loading screen, scan on background thread, transition to main UI on completion
+3. If it exists, load `SystemModel` and show the main UI immediately
+4. In the background, check package freshness via `has_package_state_changes_since()`
+5. In the background, run a shallow config freshness pass over `ConfigSearchSpec` directories and known files
+6. If package state changed → show "System packages changed. Refresh?"
+7. If package state is unchanged but config roots changed or freshness is uncertain → show "Config files may have changed. Refresh?"
+8. If no state exists → show loading screen, scan on background thread, transition to main UI on completion
 
-Fresh means the platform adapter sees no package-manager changes since `scan_date`. For Arch this comes from `/var/log/pacman.log`; for Ubuntu/Debian from `/var/log/dpkg.log`.
+MVP freshness is intentionally split:
+
+- Package freshness is authoritative and adapter-owned.
+- Config freshness is best-effort and launcher-owned.
+
+Future improvement: replace the shallow config freshness pass with persisted per-root fingerprints or filesystem notifications so config-only changes can be detected cheaply and accurately.
 
 Subsequent launches: under 1 second to interactive.
 
