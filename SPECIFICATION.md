@@ -1,7 +1,7 @@
 # Terminus — MVP Specification
 
 **Version:** 1.0.0-draft
-**Name:** Terminus — the Roman guardian of forests and boundaries
+**Name:** Terminus — the Roman god of boundaries, markers, and limits
 **What it is:** A readonly desktop application that shows you everything on your system
 **What it is not:** A package manager. It never installs, removes, or modifies anything.
 **MVP platforms:** Arch Linux (pacman) + Ubuntu/Debian (apt/dpkg)
