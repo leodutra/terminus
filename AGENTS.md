@@ -33,94 +33,107 @@ data-oriented layout, locality, and explicit mutation where that wins.
 
 ---
 
-## Architecture: Functional Core / Imperative Shell
+## Architecture: Launcher / Core / Adapters / GUI
 
 ```
           ┌─────────────────────────────┐
-          │       Interface Layer       │  HTTP handlers, CLI, gRPC
-          │  (parse input → commands)   │
+          │          GUI Crate          │  egui/eframe rendering only
+          │   reads model + progress    │
           └────────────┬────────────────┘
-                       │ commands / queries
+                       │ user intents / render state
           ┌────────────▼────────────────┐
-          │     Application Layer       │  Orchestration, use cases
-          │  (wire domain + infra)      │  async lives here
+          │      Launcher Binary        │  detects platform, owns refresh lifecycle
+          │ starts worker, swaps model  │
           └────────────┬────────────────┘
-                       │ pure calls
+                       │ shared contracts / scan results
           ┌────────────▼────────────────┐
-          │       Domain Layer          │  Pure types + logic
-          │  (no IO, no async, no deps) │  the core
+          │        terminus-core        │  model, matching, classification, persistence
+          │ builds SystemModel snapshots│
           └────────────┬────────────────┘
-                       │ port traits
+                       │ PlatformAdapter trait
           ┌────────────▼────────────────┐
-          │   Infrastructure Layer      │  DB, HTTP clients, queues
-          │  (implements port traits)   │  side effects here
+          │      Platform Adapters      │  pacman/dpkg parsing, package-manager access
+          │  emit snapshot scan results │
           └─────────────────────────────┘
 ```
 
-- Domain logic is **pure with respect to infrastructural side effects**: no DB/network/filesystem IO in `domain/`.
-- Temporal/business semantics (ordering, deadlines, causality) may still be modeled in domain types and transitions.
-- All effectful operations (DB, HTTP, filesystem, queues) live in infrastructure.
-- The application layer orchestrates — it calls domain logic and infrastructure ports.
-- Dependencies flow **inward only** — domain never imports from infrastructure or application.
+- The launcher owns scan lifecycle, freshness checks, progress polling, and atomic model replacement.
+- `terminus-core` owns shared data types, `SystemModel` construction, matching, classification, config discovery helpers, and SQLite persistence.
+- Platform adapters own package-manager interaction and platform-specific parsing only.
+- `terminus-gui` renders current model and progress state only; it never imports platform crates, touches SQLite, or shells out.
+- Keep matching, classification, alias normalization, and model-building logic pure where practical, even when the surrounding crate also contains imperative helpers.
 
 ---
 
 ## Crate Layout
 
 ```
+Cargo.toml                      # Workspace manifest + launcher binary package
 src/
-├── main.rs                     # Wiring: build deps, start server/runtime
-├── lib.rs                      # Re-exports public API
-│
-├── domain/                     # Pure core — zero external deps beyond std + domain crates
-│   ├── mod.rs                  # Public facade: re-exports only what other layers need
-│   ├── model.rs                # Core types: newtypes, enums, value objects
-│   ├── error.rs                # Domain error enum
-│   ├── logic.rs                # Pure functions operating on domain types
-│   └── ports.rs                # Trait definitions (Repository, Notifier, etc.)
-│
-├── application/                # Use-case orchestration — async allowed here
-│   ├── mod.rs
-│   ├── commands.rs             # Command structs (input DTOs for writes)
-│   ├── queries.rs              # Query structs (input DTOs for reads)
-│   └── handlers.rs             # Use-case functions: wire domain + infra
-│
-├── infrastructure/             # Side effects — implements port traits
-│   ├── mod.rs
-│   ├── persistence/            # DB adapters (sqlx, diesel, etc.)
-│   │   ├── mod.rs
-│   │   └── order_repo.rs       # impl OrderRepository for PgOrderRepo
-│   ├── http_client/            # External API clients
-│   └── config.rs               # Typed config from env/files
-│
-└── interface/                  # Inbound adapters
-    ├── mod.rs
-    ├── http/                   # Axum/Actix handlers
-    │   ├── mod.rs
-    │   ├── routes.rs
-    │   └── dto.rs              # Request/response types — parse into domain at boundary
-    └── cli/                    # CLI entrypoints if applicable
+└── main.rs                     # Launcher: platform detection, cache load, scan orchestration, eframe start
+crates/
+├── terminus-core/
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs
+│       ├── model.rs            # Core entities and value types
+│       ├── system_model.rs     # In-memory query layer used by the UI
+│       ├── db.rs               # SQLite persistence
+│       ├── platform.rs         # PlatformAdapter trait and shared platform contracts
+│       ├── matcher.rs          # Config-to-package matching
+│       ├── classify.rs         # File/config classification
+│       └── aliases.rs          # Known name aliases and normalization helpers
+├── terminus-platform-arch/
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs              # ArchAdapter implementation
+│       ├── pacman.rs           # pacman output parser
+│       └── detect.rs           # Arch platform detection
+├── terminus-platform-ubuntu/
+│   ├── Cargo.toml
+│   └── src/
+│       ├── lib.rs              # UbuntuAdapter implementation
+│       ├── dpkg.rs             # dpkg parser + .list reader
+│       └── detect.rs           # Ubuntu platform detection
+└── terminus-gui/
+    ├── Cargo.toml
+    └── src/
+        ├── lib.rs              # Render-only app shell
+        ├── app.rs              # App state and tab routing
+        ├── views/
+        │   ├── mod.rs
+        │   ├── packages.rs
+        │   ├── configs.rs
+        │   ├── disk.rs
+        │   └── loading.rs
+        ├── widgets/
+        │   ├── mod.rs
+        │   ├── detail_panel.rs
+        │   ├── search.rs
+        │   ├── confidence.rs
+        │   └── treemap.rs
+        └── theme.rs
 ```
 
 **Rules:**
-- `domain/` has **no** dependencies on `application/`, `infrastructure/`, or `interface/`.
-- `domain/` Cargo deps: only `thiserror`, `serde` (derive only), and domain math/utility crates.
-- `application/` depends on `domain/` only. It receives infra as trait objects or generics.
-- `infrastructure/` depends on `domain/` (to implement port traits). Never on `application/`.
-- `interface/` depends on `application/` and `domain/` (for types). Calls handlers.
-- `main.rs` is the only place all layers meet — it constructs and wires everything.
+- The root package is the launcher. It owns platform detection, scan lifecycle, cache load/save, and wiring between adapters, core, and GUI.
+- `terminus-core` is platform-agnostic. It owns the persistent model, `SystemModel`, matching, classification, config discovery inputs, and shared `PlatformAdapter` contracts.
+- `terminus-gui` depends only on `terminus-core`. It renders data and emits user intents; it does not import or detect platforms.
+- Platform crates implement `PlatformAdapter` and parse platform-specific package manager state. They do not depend on `terminus-gui`.
+- The launcher binary is the only place where platform crates are selected and wired into the running app.
+- Adding a new platform means adding one new `terminus-platform-*` crate and one launcher registration, with no changes required in `terminus-core` or `terminus-gui` unless the shared contract changes.
 
-For a feature that grows beyond 3–4 files, give it its own sub-module inside `domain/`:
+When a Terminus concern grows beyond 3–4 files, give it a focused submodule inside the owning crate instead of forcing a generic service-style split. For example, in `terminus-core`:
 
 ```
-domain/
-├── order/
-│   ├── mod.rs          # public facade
-│   ├── model.rs        # Order, OrderLine, OrderStatus
-│   ├── error.rs        # OrderError
-│   ├── logic.rs        # calculate_total, apply_discount — pure fns
-│   └── ports.rs        # trait OrderRepository
-└── mod.rs              # re-exports domain::order::*
+terminus-core/src/
+├── matching/
+│   ├── mod.rs
+│   ├── package_names.rs        # Name normalization and alias lookup
+│   ├── config_paths.rs         # Config discovery input shaping
+│   ├── ownership.rs            # Config ownership and multiplicity rules
+│   └── confidence.rs           # Match confidence scoring
+└── system_model.rs
 ```
 
 ---
@@ -133,105 +146,96 @@ parsing succeeds, the domain type is trusted everywhere. Never validate again.
 **Inbound:** `TryFrom` / `TryInto` (fallible — external data can be invalid).
 **Outbound:** `From` / `Into` (infallible — the domain type is already valid).
 
-### HTTP request → domain type
+### Adapter record → core package
 
 ```rust
-// interface/http/dto.rs
-#[derive(Deserialize)]
-pub struct CreateOrderRequest {
-    pub customer_id: String,
-    pub items: Vec<OrderItemDto>,
+// crates/terminus-platform-arch/src/pacman.rs
+pub struct PacmanPackageRecord {
+    pub name: String,
+    pub version: String,
+    pub install_reason: String,
 }
 
-// Parsing happens HERE — boundary between outside world and domain
-impl TryFrom<CreateOrderRequest> for CreateOrderCommand {
-    type Error = ValidationError;
+// Parsing happens HERE — boundary between raw adapter data and core types
+impl TryFrom<PacmanPackageRecord> for Package {
+    type Error = AdapterParseError;
 
-    fn try_from(req: CreateOrderRequest) -> Result<Self, Self::Error> {
-        Ok(CreateOrderCommand {
-            customer: CustomerId::parse(req.customer_id)?,
-            items: req.items
-                .into_iter()
-                .map(OrderItem::try_from)
-                .collect::<Result<Vec<_>, _>>()?,
+    fn try_from(record: PacmanPackageRecord) -> Result<Self, Self::Error> {
+        Ok(Package {
+            id: 0,
+            name: record.name.trim().to_owned(),
+            version: record.version,
+            source: PackageSource {
+                manager_id: "pacman".to_owned(),
+                channel: None,
+            },
+            size_bytes: None,
+            install_date: None,
+            install_reason: InstallReason::parse(&record.install_reason)?,
+            description: None,
         })
     }
 }
 ```
 
-### DB row → domain type
+### SQLite row → core mapping
 
 ```rust
-// infrastructure/persistence/order_repo.rs
-struct OrderRow {
-    id: i64,
-    customer_id: String,
-    status: String,
-    total_cents: i64,
+// crates/terminus-core/src/db.rs
+struct ConfigMappingRow {
+    config_path: String,
+    package_id: i64,
+    confidence: f64,
+    method: String,
+    is_primary: i64,
 }
 
-impl TryFrom<OrderRow> for Order {
+impl TryFrom<ConfigMappingRow> for ConfigMapping {
     type Error = DataCorruptionError;
 
-    fn try_from(row: OrderRow) -> Result<Self, Self::Error> {
-        Ok(Order {
-            id: OrderId::new(row.id),
-            customer: CustomerId::parse(row.customer_id)
-                .map_err(|e| DataCorruptionError::InvalidField("customer_id", e))?,
-            status: OrderStatus::parse(&row.status)?,
-            total: Money::from_cents(row.total_cents),
+    fn try_from(row: ConfigMappingRow) -> Result<Self, Self::Error> {
+        Ok(ConfigMapping {
+            id: 0,
+            config_path: CanonicalConfigPath::parse(row.config_path)?.into_string(),
+            package_id: row.package_id,
+            confidence: row.confidence,
+            method: MatchMethod::parse(&row.method)?,
+            is_primary: row.is_primary != 0,
         })
     }
 }
 ```
 
-### Env vars → typed config
+### User search text → query type
 
 ```rust
-// infrastructure/config.rs
-pub struct AppConfig {
-    pub db: DatabaseConfig,
-    pub server: ServerConfig,
-}
+pub struct SearchQuery(String);
 
-pub struct DatabaseConfig {
-    pub url: DatabaseUrl,        // newtype — validated on construction
-    pub max_connections: PoolSize,
-}
-
-impl AppConfig {
-    pub fn from_env() -> Result<Self, ConfigError> {
-        Ok(Self {
-            db: DatabaseConfig {
-                url: DatabaseUrl::parse(env_required("DATABASE_URL")?)?,
-                max_connections: PoolSize::parse(env_or("DB_POOL_SIZE", "10"))?,
-            },
-            server: ServerConfig {
-                port: Port::parse(env_or("PORT", "8080"))?,
-            },
-        })
+impl SearchQuery {
+    pub fn parse(raw: impl Into<String>) -> Result<Self, ValidationError> {
+        let query = raw.into().trim().to_lowercase();
+        if query.is_empty() {
+            Err(ValidationError::EmptySearchQuery)
+        } else {
+            Ok(Self(query))
+        }
     }
 }
 ```
 
-### Partial updates without reintroducing invalid states
+### Completed refresh → live model swap
 
 ```rust
-// Command carries only the fields being updated — each already parsed
-pub struct UpdateOrderCommand {
-    pub order_id: OrderId,
-    pub new_status: Option<OrderStatus>,    // already a valid enum variant
-    pub shipping: Option<ShippingAddress>,   // already parsed newtype
+pub struct CompletedRefresh {
+    pub scan: ScanResult,
+    pub model: SystemModel,
 }
 
-// Domain logic decides whether the transition is valid
-impl Order {
-    pub fn apply_update(self, cmd: UpdateOrderCommand) -> Result<Self, OrderError> {
-        let status = match cmd.new_status {
-            Some(new) => self.status.transition_to(new)?,  // pure validation
-            None => self.status,
-        };
-        Ok(Self { status, ..self })
+impl ScanCoordinator {
+    pub fn commit_refresh(&mut self, completed: CompletedRefresh) -> Result<(), LauncherError> {
+        persist_snapshot(&completed.scan)?;
+        self.live_model = Some(completed.model);
+        Ok(())
     }
 }
 ```
@@ -244,7 +248,7 @@ impl Order {
 
 - **Parse, don't validate.** Parse once at boundaries, trust types forever after.
 - **Make illegal states unrepresentable.** Use enums with variant-specific data, not structs with optional fields.
-- **Newtypes over primitives.** No raw `String`, `i64`, or `Uuid` in domain signatures.
+- **Newtypes over primitives.** No raw `String`, `i64`, or path strings in cross-crate core signatures when the value has real semantics.
 - **Typestate for workflows.** Model state machines as generic type parameters. Invalid transitions must not compile.
 - **ADTs are the modeling language.** Enums + structs replace class hierarchies.
 - **Value objects over mutable entities.** State transitions return new values.
@@ -253,41 +257,44 @@ impl Order {
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Email(String);
+pub struct CanonicalConfigPath(String);
 
-impl Email {
-    pub fn parse(raw: impl Into<String>) -> Result<Self, ValidationError> {
-        let s = raw.into();
-        if s.contains('@') && s.len() <= 254 {
-            Ok(Self(s))
+impl CanonicalConfigPath {
+    pub fn parse(raw: impl AsRef<str>) -> Result<Self, ValidationError> {
+        let expanded = expand_home(raw.as_ref())?;
+        let normalized = normalize_path(&expanded)?;
+        if normalized.is_empty() {
+            Err(ValidationError::EmptyPath)
         } else {
-            Err(ValidationError::InvalidEmail(s))
+            Ok(Self(normalized))
         }
     }
 
     pub fn as_str(&self) -> &str { &self.0 }
+
+    pub fn into_string(self) -> String { self.0 }
 }
 
-// No pub constructor. The only way to get an Email is through parse().
-// After parse() succeeds, the Email is trusted everywhere — no re-validation.
+// No pub constructor. The only way to get a CanonicalConfigPath is through parse().
+// After parse() succeeds, the path is trusted everywhere — no re-normalization.
 ```
 
 ### Making illegal states unrepresentable
 
 ```rust
 // BAD — optional fields invite invalid combinations
-struct Shipment {
-    tracking_number: Option<String>,
-    delivered_at: Option<DateTime>,
-    status: String,  // "pending"? "shipped"? anything?
+struct ConfigMatch {
+    path: String,
+    owner: Option<i64>,
+    shared_with: Vec<i64>,
+    is_orphaned: bool,
 }
 
 // GOOD — each state carries exactly its valid data
-enum Shipment {
-    Pending { order_id: OrderId },
-    Shipped { order_id: OrderId, tracking: TrackingNumber },
-    Delivered { order_id: OrderId, tracking: TrackingNumber, delivered_at: DateTime },
-    Cancelled { order_id: OrderId, reason: CancellationReason },
+enum ConfigOwnership {
+    Orphaned { path: CanonicalConfigPath },
+    Owned { path: CanonicalConfigPath, primary_package_id: i64, candidates: Vec<ConfigMapping> },
+    Shared { path: CanonicalConfigPath, primary_package_ids: Vec<i64>, candidates: Vec<ConfigMapping> },
 }
 ```
 
@@ -300,7 +307,7 @@ and the type is constructed and consumed across module boundaries.
 type is local to a single function.
 
 **Use a smart constructor** (newtype + `parse`) when: there's no state machine, just an
-invariant to enforce (e.g., non-empty string, positive integer, valid email).
+invariant to enforce (e.g., canonical config path, non-empty package name, valid manager id).
 
 ---
 
@@ -311,37 +318,37 @@ Errors are typed, layered, and never stringly typed.
 ### Layer separation
 
 ```rust
-// domain/error.rs — business rule violations, no infrastructure concerns
+// crates/terminus-core/src/error.rs — model and persistence failures
 #[derive(Debug, thiserror::Error)]
-pub enum OrderError {
-    #[error("cannot transition from {from} to {to}")]
-    InvalidTransition { from: OrderStatus, to: OrderStatus },
-    #[error("order total exceeds credit limit: {total} > {limit}")]
-    CreditLimitExceeded { total: Money, limit: Money },
-    #[error("empty order — at least one item required")]
-    EmptyOrder,
-}
-
-// infrastructure/error.rs — technical failures
-#[derive(Debug, thiserror::Error)]
-pub enum InfraError {
+pub enum CoreError {
     #[error("database query failed")]
-    Database(#[from] sqlx::Error),
-    #[error("external service unavailable: {service}")]
-    ServiceDown { service: &'static str },
-    #[error("data corruption in {entity}: {detail}")]
-    DataCorruption { entity: &'static str, detail: String },
+    Database(#[from] rusqlite::Error),
+    #[error("config path is not canonical: {path}")]
+    InvalidConfigPath { path: String },
+    #[error("unknown match method: {value}")]
+    InvalidMatchMethod { value: String },
 }
 
-// application/error.rs — combines both layers for use-case results
+// crates/terminus-platform-arch/src/error.rs — adapter failures
 #[derive(Debug, thiserror::Error)]
-pub enum AppError {
+pub enum AdapterError {
+    #[error("command `{command}` failed: {stderr}")]
+    CommandFailed { command: &'static str, stderr: String },
+    #[error("could not parse package metadata from {manager_id}: {detail}")]
+    ParsePackage { manager_id: &'static str, detail: String },
+    #[error("package state probe failed for {manager_id}: {detail}")]
+    FreshnessCheck { manager_id: &'static str, detail: String },
+}
+
+// src/error.rs — launcher orchestration failures
+#[derive(Debug, thiserror::Error)]
+pub enum LauncherError {
     #[error(transparent)]
-    Domain(#[from] OrderError),
+    Core(#[from] CoreError),
     #[error(transparent)]
-    Infra(#[from] InfraError),
-    #[error(transparent)]
-    Validation(#[from] ValidationError),
+    Adapter(#[from] AdapterError),
+    #[error("GUI startup failed: {detail}")]
+    GuiStartup { detail: String },
 }
 ```
 
@@ -349,16 +356,16 @@ pub enum AppError {
 
 | Layer          | Error type             | Crates allowed                        |
 |----------------|------------------------|---------------------------------------|
-| Domain         | Domain-specific enum   | `thiserror` only                      |
-| Infrastructure | Infra-specific enum    | `thiserror`, wraps driver errors      |
-| Application    | Composite enum         | `thiserror`, `From` impls for layers  |
-| Interface      | HTTP/CLI error mapping | `thiserror` or `anyhow` (only here)   |
+| terminus-core  | Core-specific enum     | `thiserror`, DB/serde wrappers as needed |
+| Platform adapter | Adapter-specific enum | `thiserror`, process/fs wrappers      |
+| Launcher       | Composite enum         | `thiserror`, `From` impls for layers  |
+| GUI            | UI mapping only        | `thiserror` or `anyhow` sparingly     |
 | `main.rs`      | Top-level              | `anyhow` / `eyre` allowed             |
 
-- `anyhow` / `eyre` never appear in domain or infrastructure.
-- Error variants carry **structured context** (types, IDs, amounts) — not format strings.
+- `anyhow` / `eyre` never appear in shared core model code or adapter parsing code.
+- Error variants carry **structured context** (paths, manager ids, package ids, scan stages) — not format strings.
 - `?` composes errors through `From` impls. Write the `From` chain explicitly.
-- Domain errors are **decisions** the business cares about. Infra errors are **incidents** ops cares about.
+- Core errors are **model/persistence** failures. Adapter errors are **scan input** failures. Launcher errors are **orchestration/startup** failures.
 
 ---
 
@@ -368,20 +375,21 @@ pub enum AppError {
 - **Railway-oriented programming.** Chain operations through `Result`/`Option` pipelines with `and_then`, `map`, `map_err`.
 - **Total functions.** Handle all input cases. No panics on valid input.
 - **Exhaustive matching.** No `_` catch-alls unless justified (e.g., `#[non_exhaustive]` from external crates).
-- **Cancellation-safe orchestration.** Treat every `await` as a cancellation point in application and infrastructure code. Use transaction boundaries, outbox patterns, and idempotent operations so cancellation never leaves partial externally visible side effects.
+- **Cancellation-safe orchestration.** Treat every blocking scan step, DB write, and model swap as an interruption point. Keep the last good cache and last good `SystemModel` intact until the replacement snapshot is complete.
 
-When this is required by default: any workflow that touches money, inventory, irreversible external side effects, or user-visible state transitions.
-Preferred patterns: DB transactions for atomic local changes, outbox for cross-system side effects, idempotency keys for retries, and at-least-once delivery assumptions for external effects.
+When this is required by default: any workflow that refreshes package state, persists a new snapshot, or replaces the live `SystemModel`.
+Preferred patterns: temp-db write then swap, complete `ScanResult` snapshots, idempotent refresh triggers, and one-way model replacement only after success.
 
 ### Side-effect delivery semantics
 
-- Name delivery semantics explicitly per workflow: **at-most-once**, **at-least-once**, or **effectively-once** (via idempotency).
-- Treat "exactly once" as an implementation illusion across distributed boundaries; model duplicates and retries explicitly.
-- For critical external effects (payments, emails, webhooks), define:
-  - deduplication key source,
-  - replay window,
-  - observable duplicate behavior.
-- Prefer durable intent recording (transactional write/outbox) before external emission.
+- Name replacement semantics explicitly per workflow: cached-only, full-refresh, or refresh-required.
+- Treat partial live updates as a bug for MVP; incomplete scans must fail without replacing the last good state.
+- For critical scan effects, define:
+    - freshness source,
+    - temp persistence target,
+    - swap point,
+    - observable failure behavior.
+- Prefer durable snapshot persistence before exposing a newly scanned model to the GUI.
 
 ### Function design
 
@@ -396,7 +404,7 @@ Preferred patterns: DB transactions for atomic local changes, outbox for cross-s
 - Default to immutable. State transitions return new values.
 - `mut` only when performance requires it **and** mutation is local to the function.
 - Never expose `&mut self` across module boundaries without justification.
-- Interior mutability (`Cell`, `RefCell`, `Mutex`) is a code smell in domain — justify every use.
+- Interior mutability (`Cell`, `RefCell`, `Mutex`) is a code smell in shared model ownership and cross-thread scan state — justify every use.
 - Prefer ownership-first APIs over incidental cloning, but freely clone in cold paths or for small values when it improves clarity.
 
 ### Semantic ownership vs memory ownership
@@ -410,29 +418,32 @@ Preferred patterns: DB transactions for atomic local changes, outbox for cross-s
 
 ## Dependency Injection
 
-- Traits define **capabilities** (ports): `trait OrderRepository`, `trait PaymentGateway`.
-- Concrete implementations live in `infrastructure/`.
-- Application handlers receive ports as generic parameters or trait objects.
+- Traits define **capabilities** at crate boundaries: `trait PlatformAdapter` is the primary example in Terminus.
+- Concrete implementations live in `terminus-platform-*` crates.
+- The launcher selects an adapter implementation and passes its results into core-owned model building.
 - Test doubles implement the same traits.
 
 ### When to introduce a trait
 
-| Situation                                          | Use a trait? |
-|----------------------------------------------------|--------------|
-| 2+ real implementations (Postgres + SQLite)        | Yes          |
-| 1 real impl but need test doubles for side effects | Yes          |
-| Pure function with no side effects                 | No — just call it |
-| Single impl, easily testable directly              | No — premature abstraction |
+| Situation                                              | Use a trait? |
+|--------------------------------------------------------|--------------|
+| 2+ real implementations (Arch + Ubuntu adapters)       | Yes          |
+| 1 real impl but need test doubles for scan lifecycle   | Yes          |
+| Pure matcher/classifier helper                         | No — just call it |
+| Single launcher/core helper, easily tested directly    | No — premature abstraction |
 
 Closures are often enough for simple injection:
 
 ```rust
-fn process_order(
-    order: Order,
-    calculate_tax: impl Fn(&Order) -> Money,   // injected behavior, no trait needed
-) -> OrderSummary {
-    let tax = calculate_tax(&order);
-    OrderSummary::new(order, tax)
+fn rank_config_candidates(
+    path: &CanonicalConfigPath,
+    candidates: &[Package],
+    score: impl Fn(&CanonicalConfigPath, &Package) -> f64,
+) -> Vec<ConfigMapping> {
+    candidates
+        .iter()
+        .map(|package| build_mapping(path, package, score(path, package)))
+        .collect()
 }
 ```
 
@@ -440,12 +451,13 @@ fn process_order(
 
 ## Naming
 
-- Types represent **meaning**, not structure: `Email` not `ValidatedString`.
-- Functions describe **what**, not **how**: `register_user` not `insert_user_into_db`.
+- Types represent **meaning**, not structure: `ManagerId` not `ValidatedString`.
+- Functions describe **what**, not **how**: `refresh_model` not `run_pacman_and_write_db`.
 - Constructors: `new`, `parse`, `with_capacity`, `from_*`.
 - Conversions: `to_*` (allocates), `as_*` (borrowed view), `into_*` (consuming).
 - Booleans: `is_` or `has_` prefix.
-- Ban: `data`, `info`, `item`, `handler`, `manager`, `service`, `utils`, `helpers`, `misc`.
+- Ban vague names like `data`, `info`, `item`, `utils`, `helpers`, `misc`.
+- Avoid suffixes like `Manager` or `Service` for types that are actually a parser, matcher, coordinator, or cache.
 - Use domain vocabulary from the business — not programmer jargon.
 
 ---
@@ -462,16 +474,17 @@ fn process_order(
 
 ## Anti-Patterns to Reject
 
-- `UserService` / `OrderManager` god objects accumulating domain logic.
-- Raw `String`, `i64`, `Uuid` leaking through domain function signatures.
-- `async fn` or IO anywhere in `domain/`.
+- `ScanManager` / `PackageService` god objects accumulating launcher, adapter, and model responsibilities.
+- Raw `String`, `i64`, or path strings leaking through cross-crate core APIs where the value has stronger semantics.
+- Shelling out to `pacman`, `dpkg`, or any platform tool from `terminus-core` or `terminus-gui`.
 - `Err("something went wrong".into())` — string errors.
-- `_ => {}` silencing the compiler on domain enums.
-- `domain/` importing from `infrastructure/` or `application/`.
+- `_ => {}` silencing the compiler on core enums like `FileType`, `MatchMethod`, or `InstallReason`.
+- `terminus-core` importing from `terminus-platform-*` or `terminus-gui`.
 - Validating the same invariant in multiple places after the boundary.
 - Traits with a single implementor and no test double.
 - `&mut self` as a default in cross-module APIs — justify every mutation.
 - `clone()` in hot paths or large-object loops without a reason — redesign ownership or document why clone is acceptable.
+- Mutating the live `SystemModel` in place while a scan is still running.
 - God-mode `App` or `Context` struct passed everywhere.
 
 ---
@@ -480,7 +493,7 @@ fn process_order(
 
 ### By layer
 
-**Domain (unit tests — pure, fast, no mocks):**
+**Core (unit tests — pure or mostly pure, fast, no real package manager):**
 
 ```rust
 #[cfg(test)]
@@ -488,17 +501,33 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pending_order_can_transition_to_confirmed() {
-        let order = Order::pending(customer_id(), items());
-        let confirmed = order.confirm().unwrap();
-        assert!(matches!(confirmed.status(), OrderStatus::Confirmed));
+    fn known_alias_maps_nvim_to_neovim() {
+        assert_eq!(resolve_alias("nvim"), Some("neovim"));
     }
 
     #[test]
-    fn delivered_order_cannot_be_cancelled() {
-        let order = Order::delivered(customer_id(), items(), now());
-        let err = order.cancel().unwrap_err();
-        assert!(matches!(err, OrderError::InvalidTransition { .. }));
+    fn shared_primary_owners_are_preserved_per_path() {
+        let mappings = vec![
+            ConfigMapping {
+                id: 1,
+                config_path: "/home/user/.config/foo/config.toml".into(),
+                package_id: 10,
+                confidence: 0.92,
+                method: MatchMethod::KnownAlias,
+                is_primary: true,
+            },
+            ConfigMapping {
+                id: 2,
+                config_path: "/home/user/.config/foo/config.toml".into(),
+                package_id: 11,
+                confidence: 0.90,
+                method: MatchMethod::NameMatch,
+                is_primary: true,
+            },
+        ];
+
+        let grouped = group_configs_by_path(&mappings);
+        assert_eq!(grouped["/home/user/.config/foo/config.toml"].len(), 2);
     }
 }
 ```
@@ -507,42 +536,47 @@ mod tests {
 
 ```rust
 #[test]
-fn valid_email_parses() {
-    assert!(Email::parse("user@example.com").is_ok());
+fn pacman_install_reason_parses() {
+    assert!(InstallReason::parse("Explicitly installed").is_ok());
 }
 
 #[test]
-fn email_without_at_rejects() {
+fn canonical_config_path_rejects_empty_input() {
     assert!(matches!(
-        Email::parse("not-an-email"),
-        Err(ValidationError::InvalidEmail(_))
+        CanonicalConfigPath::parse("   "),
+        Err(ValidationError::EmptyPath)
     ));
 }
 
 #[test]
-fn db_row_with_corrupt_status_rejects() {
-    let row = OrderRow { status: "yolo".into(), ..valid_row() };
+fn config_mapping_row_with_unknown_method_rejects() {
+    let row = ConfigMappingRow {
+        config_path: "/home/user/.config/foo/config.toml".into(),
+        package_id: 10,
+        confidence: 0.8,
+        method: "wat".into(),
+        is_primary: 1,
+    };
+
     assert!(matches!(
-        Order::try_from(row),
+        ConfigMapping::try_from(row),
         Err(DataCorruptionError::InvalidField(..))
     ));
 }
 ```
 
-**Application (integration tests — real logic, fake infra):**
+**Launcher + adapter integration tests (real orchestration, fake adapters):**
 
 ```rust
-#[tokio::test]
-async fn create_order_persists_and_notifies() {
-    let repo = FakeOrderRepo::new();
-    let notifier = FakeNotifier::new();
-    let handler = CreateOrderHandler::new(repo.clone(), notifier.clone());
+#[test]
+fn coordinator_swaps_model_only_after_complete_scan() {
+    let adapter = FakeAdapter::success(scan_result_with_counts(42, 900, 17));
+    let mut coordinator = ScanCoordinator::new(adapter, last_good_model());
 
-    let cmd = CreateOrderCommand { customer: test_customer(), items: test_items() };
-    let result = handler.handle(cmd).await.unwrap();
+    let completed = coordinator.refresh().unwrap();
 
-    assert!(repo.contains(result.order_id));
-    assert!(notifier.was_called_with(result.order_id));
+    assert_eq!(completed.model.meta.package_count, 42);
+    assert_eq!(coordinator.live_model().meta.package_count, 42);
 }
 ```
 
@@ -553,15 +587,16 @@ use proptest::prelude::*;
 
 proptest! {
     #[test]
-    fn money_from_cents_roundtrips(cents in 0i64..=i64::MAX) {
-        let money = Money::from_cents(cents);
-        prop_assert_eq!(money.to_cents(), cents);
+    fn canonical_config_path_parse_is_idempotent(path in "/[a-z0-9_./-]{1,64}") {
+        let parsed = CanonicalConfigPath::parse(&path).unwrap();
+        let reparsed = CanonicalConfigPath::parse(parsed.as_str()).unwrap();
+        prop_assert_eq!(parsed, reparsed);
     }
 
     #[test]
-    fn parsed_email_always_contains_at(s in ".+@.+") {
-        if let Ok(email) = Email::parse(s) {
-            prop_assert!(email.as_str().contains('@'));
+    fn manager_id_is_always_lowercase(s in "[A-Za-z0-9_-]{1,16}") {
+        if let Ok(manager_id) = ManagerId::parse(s) {
+            prop_assert_eq!(manager_id.as_str(), manager_id.as_str().to_lowercase());
         }
     }
 }
@@ -569,47 +604,43 @@ proptest! {
 
 ### Test naming
 
-`<unit>_<scenario>_<expected>`: `pending_order_can_transition_to_confirmed`, `email_without_at_rejects`.
+`<unit>_<scenario>_<expected>`: `known_alias_maps_nvim_to_neovim`, `canonical_config_path_rejects_empty_input`.
 
 ### What not to test
 
 - Private helper functions — test through the public API.
-- Framework glue (Axum route registration, serde derives) — unless custom logic is involved.
+- Framework glue (eframe startup wiring, serde derives) — unless custom logic is involved.
 - Things the compiler already guarantees (typestate transitions that don't compile).
 
 ### Cancellation safety tests
 
-- For each async use case, include at least one test that simulates cancellation between awaited steps.
-- Assert externally observable consistency after cancellation (no partial write + notify, no duplicate side effects on retry, durable state remains valid).
+- For each refresh workflow, include at least one test that simulates cancellation or interruption during scan work.
+- Assert externally observable consistency after cancellation (last good DB remains valid, live `SystemModel` is unchanged, no partial swap occurs).
 
 ```rust
-#[tokio::test]
-async fn create_order_is_cancellation_safe_between_persist_and_notify() {
-    let repo = FakeOrderRepo::new();
-    let notifier = BlockingNotifier::new(); // blocks until test releases it
-    let handler = CreateOrderHandler::new(repo.clone(), notifier.clone());
+#[test]
+fn cancelled_scan_keeps_last_good_model() {
+    let adapter = BlockingAdapter::new(valid_scan_result());
+    let previous = last_good_model();
+    let mut coordinator = ScanCoordinator::new(adapter.clone(), previous.clone());
 
-    let task = tokio::spawn(handler.handle(valid_cmd()));
-    notifier.wait_until_called().await; // ensure we are at a cancellation-sensitive point
-    task.abort();
-    let _ = task.await; // JoinError expected
+    coordinator.start_refresh();
+    adapter.wait_until_stage(ScanProgress::FilesIndexed(1));
+    coordinator.cancel_refresh();
 
-    // Assert consistency after cancellation.
-    // Example policy: either both persist+notify happened, or neither; retries are idempotent.
-    assert!(repo.is_consistent());
-    assert!(notifier.no_duplicates());
+    assert_eq!(coordinator.live_model().meta.scan_date, previous.meta.scan_date);
 }
 ```
 
-### Domain invariant checklist
+### Core invariant checklist
 
-For each domain type and aggregate, document and test:
+For each core type and query surface, document and test:
 
 - Constructor invariants (what `new`/`parse` guarantees forever after).
-- Transition invariants (which state changes are valid/invalid).
-- Persistence invariants (DB roundtrip cannot create invalid domain states).
-- Serialization invariants (wire/db representation preserves meaning and compatibility).
-- Time/concurrency invariants (ordering, staleness, and version-conflict behavior where relevant).
+- Ownership invariants (how primary/shared/orphaned config states are represented).
+- Persistence invariants (DB roundtrip cannot create invalid core states).
+- Search/grouping invariants (`packages_by_name`, `configs_by_path`, and `reverse_deps` stay consistent).
+- Freshness/swap invariants (failed scans never replace the last good cache or model).
 
 ---
 
@@ -621,31 +652,31 @@ Set defaults centrally (override only with explicit justification):
 
 | Operation type                       | Timeout | Retries | Backoff                | Notes |
 |--------------------------------------|---------|---------|------------------------|-------|
-| DB read/write in request path        | 1-3s    | 0-1     | small fixed/jitter     | Prefer DB-level transaction semantics over retry loops. |
-| Internal HTTP/gRPC (same trust zone) | 0.5-2s  | 1-2     | exponential + jitter   | Retry transient transport/service-unavailable only. |
-| External third-party API             | 2-10s   | 2-3     | exponential + jitter   | Always pair retries with idempotency keys. |
-| Queue publish/consume ack            | broker-defined | policy-defined | broker/client strategy | Assume at-least-once delivery; consumer must be idempotent. |
+| Package-manager snapshot commands    | 1-10s   | 0-1     | small fixed/jitter     | Fall back to the last good model on failure. |
+| Filesystem config discovery          | 1-5s    | 0       | none                   | Unreadable individual paths should degrade partially, not fail the whole scan. |
+| SQLite persist + model load          | 1-3s    | 0-1     | small fixed/jitter     | Swap only after complete success. |
+| Freshness checks                     | 0.1-1s  | 0-1     | small fixed            | Cheap enough to run on startup or refresh. |
 
 Rules:
 
-- Retry only transient failures (timeouts, 5xx, connection resets), never business-rule rejections.
+- Retry only transient OS/process failures (timeouts, temporary locks, interrupted commands), never parse or model-correlation failures.
 - Every retry policy must define max attempts and total retry budget.
-- Cancellation must stop retries immediately unless a durable handoff has already occurred.
+- Cancellation must stop retries immediately unless the new snapshot has already been durably persisted and is ready to swap.
 - Surface retry exhaustion as a typed error variant with operation context.
 
 ### Observability requirements
 
-Every application use case and external side effect must emit:
+Every scan lifecycle step and persistence side effect must emit:
 
-- Structured logs (JSON or key-value) with request/correlation ID and domain identifiers.
-- Tracing spans around each use case and each infrastructure call.
-- Result markers for side effects: `attempted`, `succeeded`, `failed`, `retried`, `deduplicated`.
+- Structured logs (JSON or key-value) with scan/request correlation data and package/config identifiers.
+- Tracing spans around each scan stage, adapter command, filesystem walk, and persistence step.
+- Result markers for refresh side effects: `attempted`, `succeeded`, `failed`, `retried`, `skipped`, `swapped`.
 
 Minimum fields for logs/spans:
 
-- `request_id` / `correlation_id`
-- use-case name
-- primary domain IDs (`order_id`, `customer_id`, etc.)
+- `scan_id` / `correlation_id`
+- stage name
+- primary identifiers (`platform_id`, `package_id`, `config_path`, etc.)
 - retry attempt index (if any)
 - timeout/cancellation status
 - typed error class/variant on failure
@@ -656,96 +687,78 @@ Minimum fields for logs/spans:
 
 ### Async boundary constraints (`Send`/`Sync`/`'static`)
 
-- Values crossing task boundaries (`tokio::spawn`, work queues, background workers) must satisfy runtime constraints explicitly (`Send + 'static` when required).
+- Values crossing task boundaries (`tokio::spawn`, scan workers, background workers) must satisfy runtime constraints explicitly (`Send + 'static` when required).
 - Avoid borrowing non-`'static` references into spawned tasks; move owned data instead.
 - Prefer `Arc<T>` + immutable state over shared mutable state; if mutation is necessary, justify synchronization primitives at module boundary.
 - Treat `spawn_blocking` as a boundary for CPU/blocking IO work only; keep domain logic pure regardless.
 
 ### Panic policy
 
-- `panic!`/`unwrap()`/`expect()` are forbidden in production paths in domain, application, and infrastructure.
+- `panic!`/`unwrap()`/`expect()` are forbidden in production paths in `terminus-core`, `terminus-platform-*`, launcher orchestration, and GUI update logic.
 - Allowed in tests and irrecoverable bootstrap failures in `main.rs` (with clear crash message).
 - Library code should return typed errors, not panic, for any invalid runtime input or dependency failure.
 - If a panic boundary exists (FFI/task supervisor), convert panic to a controlled failure signal and emit telemetry.
 
-### Versioned DTO and event schemas
+### Versioned persisted schemas and progress messages
 
-- External DTOs/events are versioned contracts: prefer additive changes, avoid breaking removals/renames.
-- Unknown fields must be tolerated where protocol allows; missing required fields must fail with typed validation errors.
-- Introduce schema/version markers for long-lived events and cross-service messages.
+- SQLite schema, cached scan records, and serialized progress payloads are versioned contracts: prefer additive changes, avoid breaking removals/renames.
+- Unknown fields or columns must be tolerated where the format allows; missing required values must fail with typed corruption errors.
+- Introduce schema/version markers for long-lived caches or exported snapshots.
 - Deprecations require a compatibility window and explicit removal criteria.
-- Mapping from wire DTO/event -> domain types remains at boundaries via `TryFrom`.
+- Mapping from adapter records / DB rows / serialized messages -> core types remains at boundaries via `TryFrom`.
 
 ---
 
 ## Before / After: Common Refactorings
 
-### God object → feature module with pure core
+### God object → launcher-owned scan coordinator
 
 ```rust
-// BEFORE — everything in one place, mixed IO and logic
-impl OrderService {
-    async fn create_order(&self, req: CreateOrderRequest) -> Result<OrderResponse> {
-        // validates input inline
-        if req.items.is_empty() { return Err(anyhow!("no items")); }
-        // business logic mixed with DB calls
-        let total = req.items.iter().map(|i| i.price * i.qty).sum::<f64>();
-        let id = sqlx::query!("INSERT INTO orders ...").execute(&self.pool).await?.last_insert_id();
-        self.email_client.send_confirmation(id).await?;
-        Ok(OrderResponse { id, total })
+// BEFORE — UI object owns commands, config walking, DB writes, and model mutation
+impl TerminusApp {
+    fn refresh(&mut self) -> Result<()> {
+        let packages = run_pacman_qi()?;
+        let files = run_pacman_ql()?;
+        let configs = discover_configs()?;
+        save_snapshot(&self.db, &packages, &files, &configs)?;
+        self.model = SystemModel::from_db(&self.db)?;
+        Ok(())
     }
 }
 
-// AFTER — separated by responsibility
-// domain/order/model.rs (pure)
-impl Order {
-    pub fn new(items: NonEmpty<OrderItem>) -> Self { ... }
-    pub fn total(&self) -> Money { self.items.iter().map(|i| i.subtotal()).sum() }
-}
-
-// domain/order/error.rs (pure)
-#[derive(Debug, thiserror::Error)]
-pub enum OrderError {
-    #[error("empty order")]
-    EmptyOrder,
-}
-
-// application/handlers.rs (orchestration)
-pub async fn create_order(
-    cmd: CreateOrderCommand,               // already parsed at boundary
-    repo: &impl OrderRepository,
-    notifier: &impl OrderNotifier,
-) -> Result<OrderId, AppError> {
-    let order = Order::new(cmd.items);      // pure domain
-    let id = repo.save(&order).await?;      // infra via port
-    notifier.order_created(id).await?;      // infra via port
-    Ok(id)
+// AFTER — launcher orchestrates, adapter scans, core builds the model
+let adapter = detect_platform();
+let mut coordinator = ScanCoordinator::new(adapter, db_path, progress_tx);
+let completed = coordinator.run_snapshot_scan()?;
+persist_snapshot(&completed.scan)?;
+swap_live_model(completed.model);
+Ok(())
 }
 ```
 
 ### Primitive obsession → newtypes
 
 ```rust
-// BEFORE — can silently swap customer_id and order_id
-fn cancel_order(customer_id: i64, order_id: i64) -> Result<()> { ... }
+// BEFORE — path and manager_id semantics are implicit and easy to misuse
+fn classify_config(manager_id: String, path: String) -> Result<()> { ... }
 
-// AFTER — compiler rejects swapped arguments
-fn cancel_order(customer: CustomerId, order: OrderId) -> Result<(), OrderError> { ... }
+// AFTER — boundary parsing enforces semantics up front
+fn classify_config(manager_id: ManagerId, path: CanonicalConfigPath) -> Result<(), CoreError> { ... }
 ```
 
 ### Scattered validation → parse-once boundary
 
 ```rust
-// BEFORE — validates in handler, again in repo, again in model
-fn handler(email: String) {
-    if !email.contains('@') { panic!("bad email"); }   // handler validates
-    save_user(email.clone());                           // repo validates again?
+// BEFORE — validates in adapter, again in core, again while building the model
+fn parse_package(record: PacmanPackageRecord) {
+    if record.name.trim().is_empty() { panic!("bad package name"); }
+    save_package(record.name.clone());
 }
 
 // AFTER — parsed once, trusted everywhere
-fn handler(req: RegisterRequest) -> Result<(), AppError> {
-    let cmd = RegisterCommand::try_from(req)?;  // Email::parse() happens here
-    save_user(cmd.email);                       // Email type is trusted — no check
+fn parse_package(record: PacmanPackageRecord) -> Result<Package, AdapterError> {
+    let package = Package::try_from(record)?;
+    save_package(package.name.clone());
     Ok(())
 }
 ```
@@ -777,20 +790,21 @@ The goal is **working software with clear boundaries** — not architectural pur
 
 Before approving any change:
 
-- [ ] Any raw `String`, `i64`, or `Uuid` in domain function signatures? → Wrap in newtype.
-- [ ] Any infrastructural side effects (DB/network/filesystem) in `domain/`? → Move to infrastructure.
+- [ ] Any raw `String`, `i64`, or path string in cross-crate core APIs where the value has stronger semantics? → Wrap in a newtype.
+- [ ] Any package-manager shellout or platform-specific parser living outside `terminus-platform-*`? → Move it to an adapter crate.
 - [ ] Any validation after the boundary (re-checking a parsed type)? → Remove.
-- [ ] Any `_ => {}` on a domain enum? → Match exhaustively.
+- [ ] Any `_ => {}` on `FileType`, `MatchMethod`, `InstallReason`, or similar core enums? → Match exhaustively.
 - [ ] Any trait with a single implementor and no test double? → Remove the trait.
 - [ ] Any `clone()` without a justifying comment? → Restructure or comment.
 - [ ] Any `unwrap()` / `expect()` outside tests? → Use `?` or handle.
-- [ ] Any `anyhow` / `eyre` in domain or infrastructure? → Use typed error.
+- [ ] Any `anyhow` / `eyre` in `terminus-core` or adapter parsing code? → Use typed error.
 - [ ] Any `&mut self` that could be `&self` with a returned new value? → Prefer immutable.
-- [ ] Any domain module importing from infrastructure? → Invert the dependency.
+- [ ] Any `terminus-core` module importing from `terminus-platform-*` or `terminus-gui`? → Invert the dependency.
 - [ ] Any stringly-typed error (`Err("...".into())`)? → Use a proper variant.
-- [ ] Any async orchestration vulnerable to cancellation at `await` points? → Ensure transactional/idempotent behavior and no partial externally visible side effects.
-- [ ] Tests cover happy path, at least one error path, and boundary parsing? → Add missing.
-- [ ] For async use cases, do tests include cancellation/interruption paths? → Add at least one cancellation safety test per critical workflow.
+- [ ] Any scan workflow vulnerable to interruption before DB/model swap? → Preserve the last good cache and live model until success.
+- [ ] Does the GUI read package manager output, SQLite, or filesystem state directly? → Route through launcher/core instead.
+- [ ] Tests cover happy path, at least one error path, boundary parsing, and ownership multiplicity? → Add missing.
+- [ ] For refresh workflows, do tests include cancellation/interruption paths? → Add at least one cancellation safety test per critical workflow.
 
 ---
 
@@ -799,19 +813,19 @@ Before approving any change:
 For existing codebases, adopt this architecture incrementally:
 
 **Phase 1 — Low effort, high payoff:**
-- Introduce newtypes for IDs and validated strings at module boundaries.
-- Replace `String`-based errors with typed enums in new code.
-- Add `TryFrom` parsing at one external boundary (e.g., HTTP input).
+- Introduce newtypes for manager ids, canonical config paths, and other high-value boundary types.
+- Replace `String`-based errors with typed enums in new core and adapter code.
+- Add `TryFrom` parsing at adapter and DB boundaries.
 
 **Phase 2 — Structural separation:**
-- Extract pure domain logic out of handlers into standalone functions.
-- Split domain types and infrastructure types into separate modules.
-- Introduce port traits where test doubles would help.
+- Extract matching, classification, and model-building logic out of launcher/UI code into `terminus-core`.
+- Move package-manager commands and parsers into `terminus-platform-*` crates.
+- Introduce fake adapters where test doubles would help.
 
 **Phase 3 — Full architecture:**
-- Enforce the layer dependency rules (domain imports nothing external).
-- Move all IO behind port traits.
-- Establish the crate layout as described above.
+- Enforce launcher-only wiring of platform crates.
+- Persist new snapshots to temporary state and swap only after success.
+- Keep `terminus-gui` render-only and dependent only on `terminus-core`.
 
 Each phase is independently valuable. Stop wherever the cost/benefit ratio peaks for your project.
 
